@@ -1,10 +1,11 @@
 name: Release
 
 # Pushing a tag vX.Y.Z builds the Windows zip on a Windows runner and the
-# macOS app (Apple silicon) on a macOS runner, each from source (the patched
-# Unicorn included). They run tools/build-windows.ps1's and
-# tools/build-macos.sh's checks and frozen self-tests, then the zip, the .dmg
-# and one SHA256SUMS.txt are attached to a DRAFT release for the tag.
+# macOS app twice, for Apple silicon (arm64) on an arm64 runner and for Intel
+# Macs (x86_64) on an Intel runner, each from source (the patched Unicorn
+# included). They run tools/build-windows.ps1's and tools/build-macos.sh's
+# checks and frozen self-tests, then the zip, the two .dmg files and one
+# SHA256SUMS.txt are attached to a DRAFT release for the tag.
 # Publishing stays a person's decision.
 #
 # The macOS app is signed with a Developer ID certificate and notarized by
@@ -25,7 +26,7 @@ name: Release
 # placeholder to replace before publishing.
 #
 # A pull request that touches the build runs the same builds and keeps the
-# zip and the .dmg as workflow artifacts, without releasing anything.
+# zip and the .dmg files as workflow artifacts, without releasing anything.
 
 on:
   push:
@@ -147,10 +148,20 @@ jobs:
           retention-days: 14
 
   macos-build:
-    name: macos-build
-    # Apple silicon. setup-python's 3.12 is python.org's build (universal2,
-    # with its own Tk); the spec makes an arm64-only app from it.
-    runs-on: macos-15
+    name: macos-build-${{ matrix.arch }}
+    # One app per architecture, each built natively: install-patched-unicorn.sh
+    # builds Unicorn for the runner's CPU, and the frozen self-test runs the
+    # app on it. setup-python's 3.12 is python.org's build (universal2, with
+    # its own Tk); the spec makes a single-architecture app from it.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -228,8 +239,9 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
           VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          args=(--python "$RUNNER_TEMP/venv/bin/python" --out "$RUNNER_TEMP/out" --version "$VERSION")
+          args=(--python "$RUNNER_TEMP/venv/bin/python" --out "$RUNNER_TEMP/out" --version "$VERSION" --arch "$ARCH")
           if [ -n "$IDENTITY" ]; then
             printf '%s\n' "$NOTARY_KEY_TEXT" > "$NOTARY_KEY"
             args+=(--identity "$IDENTITY" --notarize)
@@ -239,9 +251,10 @@ jobs:
       - name: Checksum and build info
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           out="$RUNNER_TEMP/out"
-          dmg="digiemu-macos-arm64-$VERSION.dmg"
+          dmg="digiemu-macos-$ARCH-$VERSION.dmg"
           printf '%s *%s\n' "$(shasum -a 256 "$out/$dmg" | awk '{print $1}')" "$dmg" > "$out/SHA256SUMS.txt"
           lib=$("$RUNNER_TEMP/venv/bin/python" -c 'import os, unicorn; print(os.path.join(os.path.dirname(unicorn.__file__), "lib", "libunicorn.2.dylib"))')
           printf 'unicorn_dylib_sha256=%s\npython=%s\nrunner=%s %s\n' \
@@ -252,9 +265,9 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: digiemu-macos-arm64-${{ steps.version.outputs.version }}
+          name: digiemu-macos-${{ matrix.arch }}-${{ steps.version.outputs.version }}
           path: |
-            ${{ runner.temp }}/out/digiemu-macos-arm64-*.dmg
+            ${{ runner.temp }}/out/digiemu-macos-${{ matrix.arch }}-*.dmg
             ${{ runner.temp }}/out/SHA256SUMS.txt
             ${{ runner.temp }}/out/build-info.txt
           if-no-files-found: error
@@ -264,7 +277,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: build-logs-macos
+          name: build-logs-macos-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/out/*.log
             ${{ runner.temp }}/out/*.out
@@ -299,7 +312,12 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: digiemu-macos-arm64-${{ needs.macos-build.outputs.version }}
-          path: dist/macos
+          path: dist/macos-arm64
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: digiemu-macos-x86_64-${{ needs.macos-build.outputs.version }}
+          path: dist/macos-x86_64
 
       - name: Draft the release
         env:
@@ -314,12 +332,18 @@ jobs:
             exit 1
           fi
           zip="dist/windows/digiemu-win64-$VERSION.zip"
-          dmg="dist/macos/digiemu-macos-arm64-$VERSION.dmg"
-          cat dist/windows/SHA256SUMS.txt dist/macos/SHA256SUMS.txt > dist/SHA256SUMS.txt
+          dmg="dist/macos-arm64/digiemu-macos-arm64-$VERSION.dmg"
+          dmg_intel="dist/macos-x86_64/digiemu-macos-x86_64-$VERSION.dmg"
+          for f in "$zip" "$dmg" "$dmg_intel"; do
+            [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
+          done
+          cat dist/windows/SHA256SUMS.txt dist/macos-arm64/SHA256SUMS.txt \
+            dist/macos-x86_64/SHA256SUMS.txt > dist/SHA256SUMS.txt
           dll=$(sed -n 's/^unicorn_dll_sha256=//p' dist/windows/build-info.txt)
           py=$(sed -n 's/^python=//p' dist/windows/build-info.txt)
-          dylib=$(sed -n 's/^unicorn_dylib_sha256=//p' dist/macos/build-info.txt)
-          mpy=$(sed -n 's/^python=//p' dist/macos/build-info.txt)
+          dylib=$(sed -n 's/^unicorn_dylib_sha256=//p' dist/macos-arm64/build-info.txt)
+          dylib_intel=$(sed -n 's/^unicorn_dylib_sha256=//p' dist/macos-x86_64/build-info.txt)
+          mpy=$(sed -n 's/^python=//p' dist/macos-arm64/build-info.txt)
           run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           {
             if [ -f "docs/releases/$TAG.md" ]; then
@@ -338,7 +362,7 @@ jobs:
             echo
             echo "Built by GitHub Actions from tag \`$TAG\` (commit \`${GITHUB_SHA:0:7}\`) with \`tools/build-windows.ps1\` on Python $py ([the run]($run)). The bundled \`unicorn.dll\` (SHA-256 \`$dll\`) is Unicorn 2.1.4 with the patches in \`patches/\`, built from source on the runner."
             echo
-            echo "The macOS app (Apple silicon) is built the same way, with \`tools/build-macos.sh\` on Python $mpy. Its \`libunicorn.2.dylib\` is built from the same sources (SHA-256 \`$dylib\` as built; bundling rewrites and signs it). The app is signed with a Developer ID and notarized by Apple."
+            echo "The macOS apps are built the same way, with \`tools/build-macos.sh\` on Python $mpy: \`digiemu-macos-arm64\` for Apple silicon on an arm64 runner, \`digiemu-macos-x86_64\` for Intel Macs on an Intel runner. Their \`libunicorn.2.dylib\` is built from the same sources (SHA-256 \`$dylib\` for arm64 and \`$dylib_intel\` for x86_64, as built; bundling rewrites and signs it). Both apps are signed with a Developer ID and notarized by Apple."
             echo
             echo "**No Elektron firmware is included.** digiemu is not affiliated with or endorsed by Elektron."
           } > notes.md
@@ -347,10 +371,10 @@ jobs:
               echo "release $TAG is already published; not replacing its files" >&2
               exit 1
             fi
-            gh release upload "$TAG" "$zip" "$dmg" dist/SHA256SUMS.txt --clobber
+            gh release upload "$TAG" "$zip" "$dmg" "$dmg_intel" dist/SHA256SUMS.txt --clobber
             echo "updated the files of draft release $TAG"
           else
-            gh release create "$TAG" "$zip" "$dmg" dist/SHA256SUMS.txt \
+            gh release create "$TAG" "$zip" "$dmg" "$dmg_intel" dist/SHA256SUMS.txt \
               --draft --verify-tag --title "digiemu $VERSION" --notes-file notes.md
             echo "drafted release $TAG"
           fi

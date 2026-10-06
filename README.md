@@ -1,7 +1,7 @@
 # digiemu — a Digitakt mk1 and Digitone mk1 emulator
 
 digiemu runs the Elektron Digitakt (mk1)'s and Digitone (mk1)'s own firmware
-on a Windows PC or an Apple silicon Mac. An emulated ColdFire CPU boots the
+on a Windows PC or a Mac (Apple silicon or Intel). An emulated ColdFire CPU boots the
 real operating system to its live user interface, and a clickable front panel
 plays it: the screen, every key and encoder with the key LEDs, the sequencer,
 the +Drive, and live 48 kHz audio. On the Digitone a second emulated CPU runs
@@ -35,10 +35,12 @@ time, and a PC with Smart App Control turned on blocks it.
 
 ## Quick start (macOS)
 
-1. Download `digiemu-macos-arm64-<version>.dmg` from
-   [Releases](https://github.com/irpina/digiemu/releases), open it, and drag
-   **digiemu** to **Applications**. It runs on Macs with Apple silicon (M1
-   or later), and it is signed and notarized by Apple: the first time, macOS
+1. Download the `.dmg` for your Mac from
+   [Releases](https://github.com/irpina/digiemu/releases):
+   `digiemu-macos-arm64-<version>.dmg` for Apple silicon (M1 or later), or
+   `digiemu-macos-x86_64-<version>.dmg` for an Intel Mac (Apple menu > About This
+   Mac shows which you have). Open it and drag **digiemu** to
+   **Applications**. It is signed and notarized by Apple: the first time, macOS
    asks whether to open it, as it does for any app from the internet.
 2. Get the firmware from Elektron's website, as above.
 3. Open digiemu, click **Add firmware** and pick the `.syx`.
@@ -227,13 +229,16 @@ python3.12 -m venv ../venv-mac
 ../venv-mac/bin/pip install -r requirements.txt -r requirements-build.txt
 PYTHON=../venv-mac/bin/python tools/install-patched-unicorn.sh
 tools/build-macos.sh --python ../venv-mac/bin/python --out ../build-out-mac \
-    [--identity "Developer ID Application: ..." [--notarize]]
+    [--arch arm64|x86_64] [--identity "Developer ID Application: ..." [--notarize]]
 ```
 
-It builds `digiemu.app` for Apple silicon with
-`packaging/digiemu-macos.spec`, signs it (ad hoc without `--identity`, which
-is for trying it on that Mac only), runs the self-test on the signed app,
-audits it, and makes `digiemu-macos-arm64-<version>.dmg`, auditing the app
+It builds `digiemu.app` with `packaging/digiemu-macos.spec` for the
+architecture of the Mac it runs on: the patched Unicorn is built natively,
+so build the Apple silicon app on an Apple silicon Mac and the Intel app on
+an Intel Mac. `--arch` defaults to that architecture. It signs the app (ad
+hoc without `--identity`, which is for trying it on that Mac only), runs the
+self-test on the signed app, audits it, and makes
+`digiemu-macos-<arch>-<version>.dmg`, auditing the app
 again from inside the `.dmg`. It is signed with the hardened runtime and one
 entitlement, `com.apple.security.cs.allow-jit`: Unicorn translates the
 firmware's code as it runs, and without it cannot allocate the buffer for
@@ -253,10 +258,10 @@ Releases are built by GitHub Actions
 3. On a Windows runner, the workflow checks that the tag matches
    `APP_VERSION`, builds the patched Unicorn from source, and runs
    `tools/build-windows.ps1` with the build tools pinned in
-   `requirements-build.txt`. On a macOS runner it does the same with
-   `tools/build-macos.sh`, which signs and notarizes the app. It then
-   attaches the zip, the `.dmg` and `SHA256SUMS.txt` to a **draft** release
-   for the tag.
+   `requirements-build.txt`. On two macOS runners, one Apple silicon and
+   one Intel, it does the same with `tools/build-macos.sh`, which signs and
+   notarizes each app. It then attaches the zip, both `.dmg` files and
+   `SHA256SUMS.txt` to a **draft** release for the tag.
 4. Review the draft and publish it.
 
 Signing the macOS app needs five repository secrets: `MACOS_CERTIFICATE`

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Build the macOS app, digiemu.app (Apple silicon), into
-# <out>/digiemu-macos-arm64-<version>.dmg.
+# Build the macOS app, digiemu.app, for Apple silicon (arm64) or Intel
+# (x86_64), into <out>/digiemu-macos-<arch>-<version>.dmg.
 #
 #     tools/build-macos.sh --python VENV/bin/python --out DIR [--version x.y.z]
-#                          [--identity ID [--notarize]]
+#                          [--arch arm64|x86_64] [--identity ID [--notarize]]
 #
 # --python is a venv that has requirements.txt, requirements-build.txt and the
 # patched Unicorn (PYTHON=VENV/bin/python tools/install-patched-unicorn.sh).
+# --arch defaults to the architecture of that patched libunicorn.2.dylib.
+# install-patched-unicorn.sh builds it for the Mac it runs on, so an Intel
+# app is built on an Intel Mac (or an Intel GitHub runner), and the frozen
+# self-test then runs natively. Given, --arch must match the dylib.
 # --version defaults to APP_VERSION in emu/portable.py; a release tag must
 # match it. --identity is a Developer ID Application identity in the keychain
 # (its name or SHA-1). Without it the app is signed ad hoc, which is for
@@ -16,9 +20,10 @@
 #
 # Steps, each checked before the next:
 #  1. The venv: PyInstaller's version, hooks-contrib, and the patched
-#     libunicorn.2.dylib, by behaviour (emu.unicorn_compat). Its sha256 is
-#     what the spec pins, and its LC_UUID what the audit looks for in the
-#     app (packaging/bundle_guard.py macho_uuid() says why not the hash).
+#     libunicorn.2.dylib, by architecture and by behaviour
+#     (emu.unicorn_compat). Its sha256 is what the spec pins, and its LC_UUID
+#     what the audit looks for in the app (packaging/bundle_guard.py
+#     macho_uuid() says why not the hash).
 #  2. PyInstaller with packaging/digiemu-macos.spec, dist and work under
 #     --out (never inside the repo). It signs every binary and then the app,
 #     with the hardened runtime and packaging/digiemu.entitlements.
@@ -30,7 +35,7 @@
 #     --out so that nothing lands in anyone's Application Support. Then the
 #     signature again: nothing may have been written inside the app.
 #  5. packaging/bundle_guard.py audits the app: no firmware, no private
-#     modules, every required module in the archive, one arm64 executable,
+#     modules, every required module in the archive, one executable for --arch,
 #     libunicorn.2.dylib with the patched build's LC_UUID.
 #  6. With --notarize, the app is notarized and stapled, so that it opens
 #     offline once it is copied out of the .dmg.
@@ -41,9 +46,9 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-py='' out='' version='' identity='' notarize=false
+py='' out='' version='' arch='' identity='' notarize=false
 usage() {
-  echo "usage: $0 --python VENV/bin/python --out DIR [--version x.y.z] [--identity ID [--notarize]]" >&2
+  echo "usage: $0 --python VENV/bin/python --out DIR [--version x.y.z] [--arch arm64|x86_64] [--identity ID [--notarize]]" >&2
   exit 2
 }
 while (($#)); do
@@ -51,6 +56,7 @@ while (($#)); do
   --python) py=${2:-} && shift 2 ;;
   --out) out=${2:-} && shift 2 ;;
   --version) version=${2:-} && shift 2 ;;
+  --arch) arch=${2:-} && shift 2 ;;
   --identity) identity=${2:-} && shift 2 ;;
   --notarize) notarize=true && shift ;;
   *) usage ;;
@@ -71,6 +77,7 @@ if [[ -z $version ]]; then
   version=$(sed -n "s/^APP_VERSION = '\([^']*\)'.*/\1/p" "$repo/emu/portable.py" | head -1)
 fi
 [[ $version =~ ^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$ ]] || fail "--version must be x.y.z, got '$version'"
+[[ -z $arch || $arch == arm64 || $arch == x86_64 ]] || fail "--arch must be arm64 or x86_64, got '$arch'"
 if $notarize; then
   [[ -n $identity ]] || fail '--notarize needs --identity'
   [[ -n ${NOTARY_KEY:-} && -n ${NOTARY_KEY_ID:-} && -n ${NOTARY_ISSUER:-} ]] ||
@@ -82,7 +89,6 @@ out=$(cd "$out" && pwd)
 case $out/ in "$repo"/*) fail "--out must be outside the repo ($out): dist/ would sit next to sections/ and snapshots/" ;; esac
 
 app=$out/dist/digiemu.app
-dmg=$out/digiemu-macos-arm64-$version.dmg
 exe=$app/Contents/MacOS/digiemu
 for v in TCL_LIBRARY TK_LIBRARY LIBUNICORN_PATH LIBCAPSTONE_PATH PYTHONPATH PYTHONHOME DIGIEMU_UC_DLL; do
   unset "$v"
@@ -95,8 +101,17 @@ dylib=$("$py" -c 'import os, unicorn; print(os.path.join(os.path.dirname(unicorn
 [[ -f $dylib ]] || fail "no $dylib (run tools/install-patched-unicorn.sh with PYTHON=$py)"
 uc_sha=$(sha256 "$dylib")
 uc_uuid=$("$py" -c 'import sys; sys.path.insert(0, sys.argv[1]); import bundle_guard as g; print(g.macho_uuid(open(sys.argv[2], "rb").read()))' "$repo/packaging" "$dylib")
+uc_arch=$("$py" -c 'import sys; sys.path.insert(0, sys.argv[1]); import bundle_guard as g; print(g.macho_arch(open(sys.argv[2], "rb").read()))' "$repo/packaging" "$dylib") ||
+  fail "$dylib is not a thin arm64 or x86_64 library"
 echo "  libunicorn.2.dylib  sha256 $uc_sha"
 echo "                      LC_UUID $uc_uuid"
+echo "                      arch    $uc_arch"
+if [[ -z $arch ]]; then
+  arch=$uc_arch
+elif [[ $arch != "$uc_arch" ]]; then
+  fail "--arch $arch, but the patched Unicorn is built for $uc_arch: build it on a Mac of that architecture"
+fi
+dmg=$out/digiemu-macos-$arch-$version.dmg
 (cd "$repo" && "$py" -m emu.unicorn_compat > "$out/unicorn-compat.json") ||
   fail "emu.unicorn_compat: this is not the patched Unicorn ($out/unicorn-compat.json)"
 echo '  emu.unicorn_compat: compatible'
@@ -108,9 +123,10 @@ echo "  Python $("$py" -c 'import sys; print(sys.version.split()[0])')"
 # -- 2. PyInstaller -----------------------------------------------------------------
 signer='signed ad hoc'
 [[ -z $identity ]] || signer="signed by $identity"
-step "PyInstaller (version $version, $signer)"
+step "PyInstaller (version $version, $arch, $signer)"
 rm -rf "$out/dist" "$out/work"
-if ! (cd "$out" && DIGIEMU_VERSION=$version DIGIEMU_UC_SHA256=$uc_sha DIGIEMU_CODESIGN_IDENTITY=$identity \
+if ! (cd "$out" && DIGIEMU_VERSION=$version DIGIEMU_UC_SHA256=$uc_sha DIGIEMU_TARGET_ARCH=$arch \
+  DIGIEMU_CODESIGN_IDENTITY=$identity \
   "$py" -m PyInstaller --noconfirm --clean --distpath "$out/dist" --workpath "$out/work" \
   "$repo/packaging/digiemu-macos.spec" > "$out/pyinstaller.log" 2>&1); then
   grep -E 'WARNING|ERROR|Error|refusing|would be bundled|lacks modules' "$out/pyinstaller.log" | tail -20 || true
@@ -152,7 +168,7 @@ echo '  ok, and the signature is still valid'
 step 'audit'
 audit() {
   "$py" "$repo/packaging/bundle_guard.py" "$1" --devices "$repo/devices" \
-    --unicorn-source "$dylib" --require-pyz | sed 's/^/  /'
+    --unicorn-source "$dylib" --arch "$arch" --require-pyz | sed 's/^/  /'
   return "${PIPESTATUS[0]}"
 }
 audit "$app" || fail 'bundle audit'

@@ -32,7 +32,8 @@ time (REQUIRED_MODULES), and an exe that still runs under Control Flow Guard
 
 The macOS app (digiemu.app) gets the same rules from audit_app(), adapted to
 its layout: PyInstaller's Contents/ tree, whose links are allowed as long as
-they stay inside the app, one arm64 executable, and libunicorn.2.dylib
+they stay inside the app, one executable for the app's architecture (arm64
+or x86_64), and libunicorn.2.dylib
 identified by its build UUID (macho_uuid() says why not its hash). It ships
 in a .dmg that tools/build-macos.sh makes from the audited app, not a zip.
 
@@ -359,6 +360,9 @@ def exe_problem(path, rel):
 # -- Mach-O (the macOS app) -----------------------------------------------------
 MH_MAGIC_64 = 0xfeedfacf
 CPU_TYPE_ARM64 = 0x0100000c
+CPU_TYPE_X86_64 = 0x01000007
+# The architectures a macOS app is built for: Apple silicon and Intel.
+APP_ARCHS = {'arm64': CPU_TYPE_ARM64, 'x86_64': CPU_TYPE_X86_64}
 LC_UUID = 0x1b
 
 
@@ -396,15 +400,25 @@ def macho_uuid(data):
     raise ValueError('no LC_UUID')
 
 
-def app_exe_problem(path, rel):
-    """-> why `path` is not the app's arm64 executable, or None."""
+def macho_arch(data):
+    """-> 'arm64' or 'x86_64' for the thin 64-bit Mach-O image `data`, or
+    raise ValueError."""
+    cputype, _n, _s = macho_header(data)
+    for arch, cpu in APP_ARCHS.items():
+        if cpu == cputype:
+            return arch
+    raise ValueError('built for CPU type 0x%x, neither arm64 nor x86_64' % cputype)
+
+
+def app_exe_problem(path, rel, arch='arm64'):
+    """-> why `path` is not the app's executable for `arch`, or None."""
     try:
         with open(path, 'rb') as fh:
             cputype, _n, _s = macho_header(fh.read(1 << 16))
     except (OSError, ValueError) as exc:
         return '%s: %s' % (rel, exc)
-    if cputype != CPU_TYPE_ARM64:
-        return '%s: built for CPU type 0x%x, not arm64' % (rel, cputype)
+    if cputype != APP_ARCHS[arch]:
+        return '%s: built for CPU type 0x%x, not %s' % (rel, cputype, arch)
     return None
 
 
@@ -508,16 +522,20 @@ def _inside_app(link, real_app):
 
 
 def audit_app(app, devices_dir=None, unicorn_uuid=None, lister=None,
-              require_pyz=False, max_bytes=MAX_BYTES, required=REQUIRED_MODULES):
+              require_pyz=False, max_bytes=MAX_BYTES, required=REQUIRED_MODULES,
+              arch='arm64'):
     """-> (files, problems) for the macOS app `app` (dist/digiemu.app), as
     audit() is for the Windows folder: the same deny rules, firmware hashes,
     size budget and archive checks. What differs is the layout. The app
-    holds only Contents/, and Contents/MacOS only the arm64 executable.
+    holds only Contents/, and Contents/MacOS only the executable, built for
+    `arch` ('arm64' or 'x86_64').
     PyInstaller links Resources/ and Frameworks/ to each other, so links are
     allowed, but only ones that resolve inside the app; their targets are
     audited where they are. libunicorn.2.dylib must be exactly
     APP_UNICORN, and when unicorn_uuid is given, carry that LC_UUID (see
     macho_uuid()). `files` are the regular files, '/'-separated, sorted."""
+    if arch not in APP_ARCHS:
+        raise ValueError('arch must be one of %s, got %r' % (', '.join(APP_ARCHS), arch))
     problems = []
     if not os.path.isdir(app):
         return [], ['%s: no such folder' % app]
@@ -564,7 +582,7 @@ def audit_app(app, devices_dir=None, unicorn_uuid=None, lister=None,
                 problems.append('%s: is a firmware release listed in %s' % (rel, devices_dir))
                 continue
             if rel == APP_EXE:
-                why = app_exe_problem(full, rel)
+                why = app_exe_problem(full, rel, arch)
                 if why:
                     problems.append(why)
             if n == 'libunicorn.2.dylib':
@@ -633,6 +651,8 @@ def main(argv=None):
     ap.add_argument('--unicorn-source', metavar='DYLIB',
                     help='macOS: the patched libunicorn.2.dylib the app was built from; '
                          'the bundled one must carry its LC_UUID')
+    ap.add_argument('--arch', choices=sorted(APP_ARCHS), default='arm64',
+                    help='macOS: the architecture the app is built for (default arm64)')
     ap.add_argument('--require-pyz', action='store_true',
                     help='fail if the exe archives cannot be listed')
     ap.add_argument('--zip', metavar='OUT', help='write OUT.zip if the audit is clean')
@@ -647,7 +667,7 @@ def main(argv=None):
             with open(args.unicorn_source, 'rb') as fh:
                 uuid = macho_uuid(fh.read())
         files, problems = audit_app(args.dist, args.devices, uuid, pyinstaller_lister(),
-                                    args.require_pyz)
+                                    args.require_pyz, arch=args.arch)
     else:
         files, problems = audit(args.dist, args.devices, args.unicorn_sha256,
                                 pyinstaller_lister(), args.require_pyz)

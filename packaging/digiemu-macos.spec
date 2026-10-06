@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the macOS app (digiemu.app, Apple silicon).
+"""PyInstaller spec for the macOS app (digiemu.app, Apple silicon or Intel).
 
 Build it with tools/build-macos.sh, which passes DIGIEMU_VERSION,
-DIGIEMU_UC_SHA256 and, to sign, DIGIEMU_CODESIGN_IDENTITY, runs the
+DIGIEMU_UC_SHA256, DIGIEMU_TARGET_ARCH (arm64, the default, or x86_64) and,
+to sign, DIGIEMU_CODESIGN_IDENTITY, runs the
 self-test on the signed app, audits it through packaging/bundle_guard.py and
 makes the .dmg. By hand, from a venv that has PyInstaller, the patched
 Unicorn (tools/install-patched-unicorn.sh), capstone and python-rtmidi:
@@ -33,8 +34,11 @@ analysis. What differs, and why:
     guest code into host code as it runs (a JIT), which the hardened
     runtime refuses without com.apple.security.cs.allow-jit. Without an
     identity the app is signed ad hoc, for trying it on the Mac that built it.
-  * arm64 only, and no Control Flow Guard or PE version resource: those are
-    Windows things. The version goes into Info.plist instead.
+  * One architecture per app, DIGIEMU_TARGET_ARCH: arm64 for Apple silicon,
+    x86_64 for Intel Macs. The patched Unicorn is built natively, so each is
+    built on a Mac of that architecture. No Control Flow Guard or PE version
+    resource: those are Windows things. The version goes into Info.plist
+    instead.
 """
 import hashlib
 import importlib.metadata
@@ -74,6 +78,12 @@ def _sha256(path):
 VERSION = os.environ.get('DIGIEMU_VERSION', '0.1.0')
 if not re.fullmatch(r'\d{1,5}\.\d{1,5}\.\d{1,5}', VERSION):
     raise SystemExit('DIGIEMU_VERSION must be x.y.z, got %r' % VERSION)
+
+# -- architecture ------------------------------------------------------------
+TARGET_ARCH = os.environ.get('DIGIEMU_TARGET_ARCH') or 'arm64'
+if TARGET_ARCH not in guard.APP_ARCHS:
+    raise SystemExit('DIGIEMU_TARGET_ARCH must be one of %s, got %r'
+                     % (', '.join(sorted(guard.APP_ARCHS)), TARGET_ARCH))
 
 # -- the patched libunicorn.2.dylib ----------------------------------------
 UC_DYLIB = os.environ.get('DIGIEMU_UC_DLL') or os.path.join(
@@ -188,7 +198,7 @@ exe = EXE(pyz, a.scripts, [('X utf8', None, 'OPTION')],
           exclude_binaries=True, name='digiemu', debug=False,
           bootloader_ignore_signals=False, strip=False, upx=False,
           console=False, disable_windowed_traceback=False, argv_emulation=False,
-          target_arch='arm64', codesign_identity=IDENTITY, entitlements_file=ENTITLEMENTS,
+          target_arch=TARGET_ARCH, codesign_identity=IDENTITY, entitlements_file=ENTITLEMENTS,
           icon=ICON)
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, upx_exclude=[], name='digiemu')
 app = BUNDLE(coll, name='digiemu.app', icon=ICON, bundle_identifier='io.github.irpina.digiemu',

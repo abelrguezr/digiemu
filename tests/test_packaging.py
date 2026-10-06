@@ -1064,6 +1064,23 @@ class AppBundleGuardTest(unittest.TestCase):
                 self.assertEqual(len(problems), 1, problems)
                 self.assertIn(why, problems[0])
 
+    def test_an_intel_app_needs_an_x86_64_executable(self):
+        exe = os.path.join(self.app, *guard.APP_EXE.split('/'))
+        problems = self.audit(arch='x86_64')[1]
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('not x86_64', problems[0])
+        with open(exe, 'wb') as fh:
+            fh.write(_macho(CPU_X86_64, filetype=2, uuid=None, tail=ARCHIVE))
+        self.assertEqual(self.audit(arch='x86_64')[1], [])
+        with self.assertRaises(ValueError):
+            self.audit(arch='i386')
+
+    def test_macho_arch(self):
+        self.assertEqual(guard.macho_arch(_macho()), 'arm64')
+        self.assertEqual(guard.macho_arch(_macho(CPU_X86_64)), 'x86_64')
+        with self.assertRaises(ValueError):
+            guard.macho_arch(_macho(0x12))
+
     def test_unicorn_is_identified_by_its_build_uuid(self):
         self.assertEqual(self.audit(unicorn_uuid=UUID.hex().upper())[1], [])
         problems = self.audit(unicorn_uuid='ab' * 16)[1]
@@ -1214,6 +1231,10 @@ class MacSpecTest(unittest.TestCase):
         self.assertEqual(self.run_spec()['exe'].kwargs['codesign_identity'],
                          'Developer ID Application: Someone (TEAM)')
 
+    def test_an_intel_app(self):
+        self.env['DIGIEMU_TARGET_ARCH'] = 'x86_64'
+        self.assertEqual(self.run_spec()['exe'].kwargs['target_arch'], 'x86_64')
+
     def test_the_bundle(self):
         made = self.run_spec()
         b = made['bundle']
@@ -1238,6 +1259,7 @@ class MacSpecTest(unittest.TestCase):
             'no pin': ({'DIGIEMU_UC_SHA256': ''}, None, 'set DIGIEMU_UC_SHA256'),
             'wrong dylib': ({'DIGIEMU_UC_SHA256': '0' * 64}, None, 'refusing to bundle'),
             'bad version': ({'DIGIEMU_VERSION': '1.2'}, None, 'x.y.z'),
+            'bad arch': ({'DIGIEMU_TARGET_ARCH': 'universal2'}, None, 'DIGIEMU_TARGET_ARCH'),
             'firmware': ({}, ('extra_datas', [('snapshots/a/gui.snap', '/x/gui.snap', 'DATA')]),
                          'firmware-derived'),
             'private': ({}, ('extra_pure', [('dt2.build', '/r/dt2/build.py', 'PYMODULE')]),
@@ -1329,6 +1351,8 @@ class RepoFilesTest(unittest.TestCase):
         self.assertEqual(at, sorted(at))
         self.assertIn('com.apple.security.cs.allow-jit', text)
         self.assertIn('HOME=$out/selftest-home', text)
+        self.assertIn('DIGIEMU_TARGET_ARCH=$arch', text)
+        self.assertIn('--arch "$arch"', text)
 
     def test_build_script_is_ascii(self):
         # Windows PowerShell 5.1 reads a BOM-less script in the ANSI code page.
